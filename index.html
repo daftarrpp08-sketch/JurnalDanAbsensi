@@ -184,6 +184,7 @@
           <div class="dropdown-divider"></div>
           <div class="dropdown-header">📥 Import / Export Data</div>
           <button class="dropdown-item" onclick="importExcel(); closeAllDropdowns();">📥 Import Excel Siswa</button>
+          <button class="dropdown-item" onclick="exportStudentDataExcel(); closeAllDropdowns();">📤 Export Excel Data Siswa</button>
           <button class="dropdown-item" onclick="exportExcel(); closeAllDropdowns();"> Export Excel Rekap</button>
           <button class="dropdown-item" onclick="downloadTemplate(); closeAllDropdowns();">📋 Download Template Excel</button>
           <div class="dropdown-divider"></div>
@@ -247,10 +248,9 @@
       </div>
     </div>
     <div class="clock-info">
-      <span>🕐 Waktu sekarang: <b>12:22:37</b></span>
-      <span class="auto-badge">Auto: Jam Ke-7</span>
-      <span>🟢 Sedang berlangsung</span>
-      <button class="btn-blue" style="padding:3px 10px; font-size:11px; margin-left:auto;" onclick="autoDetectHour()"> Deteksi Ulang</button>
+      <span>🕐 Waktu sekarang: <b id="liveClockTime">12:22:37</b></span>
+      <span class="auto-badge" id="liveAutoBadge">Auto: Jam Ke-7</span>
+      <span id="liveStatusText">🟢 Sedang berlangsung</span>
     </div>
     <div class="form-row">
       <div><label>Tanggal Pertemuan</label>
@@ -1662,14 +1662,52 @@ function formatClock() {
   const now = new Date();
   return [now.getHours(), now.getMinutes(), now.getSeconds()].map(n => String(n).padStart(2,'0')).join(':');
 }
+function updateRealTimeClockAndHour() {
+  const clockText = formatClock();
+  const el = document.getElementById('headerClock');
+  if (el) el.textContent = '🕐 ' + clockText;
+
+  const liveTimeEl = document.getElementById('liveClockTime');
+  if (liveTimeEl) liveTimeEl.textContent = clockText;
+
+  const liveBadgeEl = document.getElementById('liveAutoBadge');
+  const liveStatusEl = document.getElementById('liveStatusText');
+
+  if (liveBadgeEl || liveStatusEl) {
+    const info = getCurrentHourInfo();
+    if (liveBadgeEl) liveBadgeEl.textContent = `Auto: Jam Ke-${info.hour}`;
+    if (liveStatusEl) {
+      const statusText = info.status === 'active' ? '🟢 Sedang berlangsung'
+                       : info.status === 'before' ? ' Belum mulai' : '✅ Sudah selesai';
+      liveStatusEl.textContent = statusText;
+    }
+
+    // Direct auto-update of meeting hour select if current meeting date is today
+    const meetingDateInput = document.getElementById('meetingDate');
+    const meetingHourSelect = document.getElementById('meetingHour');
+    if (meetingDateInput && meetingHourSelect && meetingDateInput.value === getLocalDateString()) {
+      if (meetingHourSelect.dataset.userModified !== 'true') {
+        const targetVal = String(info.hour);
+        if (meetingHourSelect.value !== targetVal) {
+          const optionExists = Array.from(meetingHourSelect.options).some(opt => opt.value === targetVal);
+          if (optionExists) {
+            meetingHourSelect.value = targetVal;
+            const c = state.classes[currentClass];
+            if (c && c.meetings > 0 && c.meetingsData && c.meetingsData[currentMeeting]) {
+              c.meetingsData[currentMeeting].hour = info.hour;
+              saveState();
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 function startClock() {
   if (clockInterval) clearInterval(clockInterval);
-  const update = () => {
-    const el = document.getElementById('headerClock');
-    if (el) el.textContent = '🕐 ' + formatClock();
-  };
-  update();
-  clockInterval = setInterval(update, 1000);
+  updateRealTimeClockAndHour();
+  clockInterval = setInterval(updateRealTimeClockAndHour, 1000);
 }
 
 /* ===== HEADER ===== */
@@ -1790,10 +1828,9 @@ function renderMeetingForm() {
       </div>
     </div>
     <div class="clock-info">
-      <span>🕐 Waktu sekarang: <b>${formatClock()}</b></span>
-      <span class="auto-badge">Auto: Jam Ke-${info.hour}</span>
-      <span>${statusText}</span>
-      <button class="btn-blue" style="padding:3px 10px; font-size:11px; margin-left:auto;" onclick="autoDetectHour()"> Deteksi Ulang</button>
+      <span>🕐 Waktu sekarang: <b id="liveClockTime">${formatClock()}</b></span>
+      <span class="auto-badge" id="liveAutoBadge">Auto: Jam Ke-${info.hour}</span>
+      <span id="liveStatusText">${statusText}</span>
     </div>
     <div class="form-row">
       <div><label>Tanggal Pertemuan</label>
@@ -3242,6 +3279,30 @@ function handleFile(e) {
   };
   reader.readAsArrayBuffer(file);
   e.target.value = '';
+}
+
+function exportStudentDataExcel() {
+  const wb = XLSX.utils.book_new();
+  let hasStudents = false;
+  state.classes.forEach(c => {
+    if (!c.students || !c.students.length) return;
+    hasStudents = true;
+    const rows = c.students.map((st, idx) => ({
+      'No': idx + 1,
+      'NIS': st.nis || '-',
+      'Nama': st.name,
+      'Kelas': c.name
+    }));
+    const safeName = c.name.replace(/[\\\/\?\*\[\]:]/g, '').substring(0, 31);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), safeName);
+  });
+  if (!hasStudents) {
+    toast('Belum ada data siswa untuk diexport', 'error');
+    return;
+  }
+  const schoolNameSafe = state.schoolName.replace(/\s+/g, '_');
+  XLSX.writeFile(wb, `Data_Siswa_${schoolNameSafe}_${getLocalDateString()}.xlsx`);
+  toast('✅ Data siswa berhasil diexport to Excel');
 }
 
 function exportExcel() {
