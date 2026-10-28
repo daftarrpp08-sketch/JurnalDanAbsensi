@@ -203,10 +203,13 @@
       <div class="dropdown" id="meetingMenuDropdown">
         <button class="btn-purple" onclick="toggleDropdown('meetingMenuDropdownMenu')">⚡ Aksi Pertemuan ▾</button>
         <div class="dropdown-menu" id="meetingMenuDropdownMenu">
-          <button class="dropdown-item" onclick="exportMeetingFile(); closeAllDropdowns();">📤 Export Pertemuan (JSON)</button>
+          <button class="dropdown-item" onclick="exportMeetingFile(); closeAllDropdowns();">📤 Export Pertemuan Ini (JSON)</button>
+          <button class="dropdown-item" onclick="exportAllMeetingsFile(); closeAllDropdowns();">📤 Export Seluruh Pertemuan (JSON)</button>
           <button class="dropdown-item" onclick="importMeetingFile(); closeAllDropdowns();">📥 Import Pertemuan (JSON)</button>
           <div class="dropdown-divider"></div>
           <button class="dropdown-item" onclick="openSyncMeetingModal(); closeAllDropdowns();">👯 Samakan ke Kelas Lain</button>
+          <div class="dropdown-divider"></div>
+          <button class="dropdown-item text-red" onclick="deleteMeeting(); closeAllDropdowns();">🗑 Hapus Pertemuan Ini</button>
         </div>
       </div>
     </div>
@@ -1270,11 +1273,22 @@
 <div class="modal-bg" id="syncMeetingModal">
   <div class="modal">
     <h3>👯 Samakan Pertemuan ke Kelas Lain</h3>
-    <p>Pilih kelas-kelas yang ingin disamakan tanggal, jam pelajaran, dan materinya dengan <b>Pertemuan <span id="syncMeetingNum">1</span></b> dari kelas <b id="syncMeetingSourceClass">-</b>.</p>
-    <div style="background:#f0f4ff; border:1px solid #93c5fd; padding:10px; border-radius:4px; font-size:12px; margin-bottom:12px;">
+    <p>Pilih mode penyamaan dan kelas-kelas tujuan dari kelas asal <b id="syncMeetingSourceClass">-</b>:</p>
+    <div class="form-group" style="margin-bottom:10px;">
+      <label style="font-size:12px; font-weight:bold;">Mode Penyamaan:</label>
+      <select id="syncScopeSelect" onchange="onSyncScopeChange()" style="width:100%;">
+        <option value="single">Pertemuan Ini Saja (Pertemuan <span id="syncMeetingScopeNum">1</span>)</option>
+        <option value="all">Seluruh Pertemuan (Pertemuan 1 s/d <span id="syncMeetingTotalNum">1</span>)</option>
+      </select>
+    </div>
+    <div id="syncSinglePreviewBox" style="background:#f0f4ff; border:1px solid #93c5fd; padding:10px; border-radius:4px; font-size:12px; margin-bottom:12px;">
       <div>📅 Tanggal: <b id="syncMeetingDate">-</b></div>
-      <div>⏰ Jam: <b id="syncMeetingHour">-</b></div>
+      <div>⏰ Jam: <b id="syncMeetingHour">-</b> (Jam akan menyesuaikan otomatis kelas tujuan)</div>
       <div>📖 Materi: <i id="syncMeetingMaterial">-</i></div>
+    </div>
+    <div id="syncAllPreviewBox" style="background:#f0f4ff; border:1px solid #93c5fd; padding:10px; border-radius:4px; font-size:12px; margin-bottom:12px; display:none;">
+      <div>📊 Menyalin <b id="syncAllCount">0</b> Pertemuan sekaligus.</div>
+      <div style="font-size:11px; color:#555;">Jam pelajaran akan otomatis menyesuaikan jam mengajar masing-masing kelas tujuan.</div>
     </div>
     <div style="margin-bottom:10px;">
       <label style="font-weight:bold; font-size:12px; cursor:pointer;">
@@ -1862,6 +1876,7 @@ function exportMeetingFile() {
   const data = {
     type: 'absensi_meeting_data',
     version: '1.0',
+    scope: 'single',
     meetingNumber: currentMeeting,
     className: c.name,
     subject: c.subject,
@@ -1884,6 +1899,46 @@ function exportMeetingFile() {
   toast(`✅ File Pertemuan ${currentMeeting} (${c.name}) diexport`);
 }
 
+function exportAllMeetingsFile() {
+  const c = state.classes[currentClass];
+  if (c.meetings === 0) {
+    toast('Belum ada pertemuan untuk diexport!', 'error');
+    return;
+  }
+  const meetingsList = [];
+  for (let m = 1; m <= c.meetings; m++) {
+    const d = c.meetingsData[m] || {};
+    meetingsList.push({
+      meetingNumber: m,
+      date: d.date || getLocalDateString(),
+      hour: d.hour || (c.startHour || 1),
+      material: d.material || ''
+    });
+  }
+  const data = {
+    type: 'absensi_meeting_data',
+    version: '1.0',
+    scope: 'all',
+    totalMeetings: c.meetings,
+    className: c.name,
+    subject: c.subject,
+    meetings: meetingsList,
+    exportedAt: new Date().toISOString()
+  };
+  const jsonStr = JSON.stringify(data, null, 2);
+  const blob = new Blob([jsonStr], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const safeClassName = c.name.replace(/[^a-zA-Z0-9]/g, '_');
+  a.href = url;
+  a.download = `Seluruh_Pertemuan_${safeClassName}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast(`✅ Export ${c.meetings} pertemuan dari kelas ${c.name} selesai!`);
+}
+
 function importMeetingFile() {
   document.getElementById('meetingFileInput').click();
 }
@@ -1895,21 +1950,47 @@ function handleMeetingFile(e) {
   reader.onload = ev => {
     try {
       const data = JSON.parse(ev.target.result);
-      if (!data || (data.type !== 'absensi_meeting_data' && data.material === undefined)) {
+      if (!data || (data.type !== 'absensi_meeting_data' && data.material === undefined && !data.meetings)) {
         toast('Format file pertemuan tidak valid!', 'error');
         return;
       }
       const c = state.classes[currentClass];
-      if (c.meetings === 0) {
-        addMeeting();
+      const targetDefaultHour = c.startHour || 1;
+
+      if (data.scope === 'all' && Array.isArray(data.meetings)) {
+        const totalToImport = data.meetings.length;
+        if (c.meetings < totalToImport) {
+          c.meetings = totalToImport;
+          c.students.forEach(st => {
+            if (!c.attendance[st.id]) c.attendance[st.id] = {};
+            for (let m = 1; m <= totalToImport; m++) {
+              if (!c.attendance[st.id][m]) c.attendance[st.id][m] = 'H';
+            }
+          });
+        }
+        data.meetings.forEach((mItem, idx) => {
+          const mNum = idx + 1;
+          if (!c.meetingsData[mNum]) c.meetingsData[mNum] = {};
+          if (mItem.date) c.meetingsData[mNum].date = mItem.date;
+          c.meetingsData[mNum].hour = targetDefaultHour;
+          c.meetingsData[mNum].material = mItem.material || '';
+        });
+        currentMeeting = 1;
+        saveState();
+        render();
+        toast(`✅ Import ${totalToImport} pertemuan ke kelas ${c.name} berhasil! (Jam disesuaikan ke Jam Ke-${targetDefaultHour})`);
+      } else {
+        if (c.meetings === 0) {
+          addMeeting();
+        }
+        if (!c.meetingsData[currentMeeting]) c.meetingsData[currentMeeting] = {};
+        if (data.date) c.meetingsData[currentMeeting].date = data.date;
+        c.meetingsData[currentMeeting].hour = targetDefaultHour;
+        if (data.material !== undefined) c.meetingsData[currentMeeting].material = data.material;
+        saveState();
+        renderMeetingForm();
+        toast(`✅ Data Pertemuan ${currentMeeting} diimport! (Jam disesuaikan ke Jam Ke-${targetDefaultHour})`);
       }
-      if (!c.meetingsData[currentMeeting]) c.meetingsData[currentMeeting] = {};
-      if (data.date) c.meetingsData[currentMeeting].date = data.date;
-      if (data.hour) c.meetingsData[currentMeeting].hour = +data.hour;
-      if (data.material !== undefined) c.meetingsData[currentMeeting].material = data.material;
-      saveState();
-      renderMeetingForm();
-      toast(`✅ Data Pertemuan ${currentMeeting} berhasil diimport!`);
     } catch(err) {
       toast('Gagal import file: ' + err.message, 'error');
     }
@@ -1925,11 +2006,22 @@ function openSyncMeetingModal() {
     return;
   }
   const d = c.meetingsData[currentMeeting] || {};
-  document.getElementById('syncMeetingNum').textContent = currentMeeting;
+  const elemScopeNum = document.getElementById('syncMeetingScopeNum');
+  if (elemScopeNum) elemScopeNum.textContent = currentMeeting;
+  const elemTotalNum = document.getElementById('syncMeetingTotalNum');
+  if (elemTotalNum) elemTotalNum.textContent = c.meetings;
+
   document.getElementById('syncMeetingSourceClass').textContent = c.name;
   document.getElementById('syncMeetingDate').textContent = d.date || getLocalDateString();
   document.getElementById('syncMeetingHour').textContent = `Jam Ke-${d.hour || (c.startHour || 1)}`;
   document.getElementById('syncMeetingMaterial').textContent = d.material || '(kosong)';
+
+  const countElem = document.getElementById('syncAllCount');
+  if (countElem) countElem.textContent = c.meetings;
+
+  const scopeSel = document.getElementById('syncScopeSelect');
+  if (scopeSel) scopeSel.value = 'single';
+  onSyncScopeChange();
 
   const container = document.getElementById('syncClassListContainer');
   let html = '';
@@ -1951,6 +2043,19 @@ function openSyncMeetingModal() {
   document.getElementById('syncMeetingModal').classList.add('show');
 }
 
+function onSyncScopeChange() {
+  const scope = document.getElementById('syncScopeSelect').value;
+  const singleBox = document.getElementById('syncSinglePreviewBox');
+  const allBox = document.getElementById('syncAllPreviewBox');
+  if (scope === 'all') {
+    if (singleBox) singleBox.style.display = 'none';
+    if (allBox) allBox.style.display = 'block';
+  } else {
+    if (singleBox) singleBox.style.display = 'block';
+    if (allBox) allBox.style.display = 'none';
+  }
+}
+
 function closeSyncMeetingModal() {
   document.getElementById('syncMeetingModal').classList.remove('show');
 }
@@ -1961,38 +2066,70 @@ function toggleSelectAllSyncClasses(checked) {
 
 function applyMeetingSync() {
   const c = state.classes[currentClass];
-  const sourceM = c.meetingsData[currentMeeting] || {};
+  const scope = document.getElementById('syncScopeSelect') ? document.getElementById('syncScopeSelect').value : 'single';
   const checkboxes = document.querySelectorAll('.sync-class-checkbox:checked');
   if (checkboxes.length === 0) {
     toast('Pilih minimal 1 kelas tujuan!', 'error');
     return;
   }
   let count = 0;
-  checkboxes.forEach(cb => {
-    const targetIdx = +cb.value;
-    const targetClass = state.classes[targetIdx];
-    if (targetClass) {
-      if (targetClass.meetings < currentMeeting) {
-        targetClass.meetings = currentMeeting;
-        targetClass.students.forEach(st => {
-          if (!targetClass.attendance[st.id]) targetClass.attendance[st.id] = {};
-          for (let m = 1; m <= currentMeeting; m++) {
-            if (!targetClass.attendance[st.id][m]) targetClass.attendance[st.id][m] = 'H';
-          }
-        });
+
+  if (scope === 'all') {
+    const totalSourceMeetings = c.meetings;
+    checkboxes.forEach(cb => {
+      const targetIdx = +cb.value;
+      const targetClass = state.classes[targetIdx];
+      if (targetClass) {
+        if (targetClass.meetings < totalSourceMeetings) {
+          targetClass.meetings = totalSourceMeetings;
+          targetClass.students.forEach(st => {
+            if (!targetClass.attendance[st.id]) targetClass.attendance[st.id] = {};
+            for (let m = 1; m <= totalSourceMeetings; m++) {
+              if (!targetClass.attendance[st.id][m]) targetClass.attendance[st.id][m] = 'H';
+            }
+          });
+        }
+        for (let m = 1; m <= totalSourceMeetings; m++) {
+          const srcM = c.meetingsData[m] || {};
+          if (!targetClass.meetingsData[m]) targetClass.meetingsData[m] = {};
+          targetClass.meetingsData[m].date = srcM.date || getLocalDateString();
+          targetClass.meetingsData[m].hour = targetClass.startHour || 1;
+          targetClass.meetingsData[m].material = srcM.material || '';
+        }
+        count++;
       }
-      if (!targetClass.meetingsData[currentMeeting]) {
-        targetClass.meetingsData[currentMeeting] = {};
+    });
+    saveState();
+    closeSyncMeetingModal();
+    toast(`✅ Berhasil menyamakan seluruh (${totalSourceMeetings}) pertemuan ke ${count} kelas! (Jam disesuaikan otomatis)`);
+  } else {
+    const sourceM = c.meetingsData[currentMeeting] || {};
+    checkboxes.forEach(cb => {
+      const targetIdx = +cb.value;
+      const targetClass = state.classes[targetIdx];
+      if (targetClass) {
+        if (targetClass.meetings < currentMeeting) {
+          targetClass.meetings = currentMeeting;
+          targetClass.students.forEach(st => {
+            if (!targetClass.attendance[st.id]) targetClass.attendance[st.id] = {};
+            for (let m = 1; m <= currentMeeting; m++) {
+              if (!targetClass.attendance[st.id][m]) targetClass.attendance[st.id][m] = 'H';
+            }
+          });
+        }
+        if (!targetClass.meetingsData[currentMeeting]) {
+          targetClass.meetingsData[currentMeeting] = {};
+        }
+        targetClass.meetingsData[currentMeeting].date = sourceM.date || getLocalDateString();
+        targetClass.meetingsData[currentMeeting].hour = targetClass.startHour || 1;
+        targetClass.meetingsData[currentMeeting].material = sourceM.material || '';
+        count++;
       }
-      targetClass.meetingsData[currentMeeting].date = sourceM.date || getLocalDateString();
-      targetClass.meetingsData[currentMeeting].hour = sourceM.hour || (targetClass.startHour || 1);
-      targetClass.meetingsData[currentMeeting].material = sourceM.material || '';
-      count++;
-    }
-  });
-  saveState();
-  closeSyncMeetingModal();
-  toast(`✅ Berhasil menyamakan Pertemuan ${currentMeeting} ke ${count} kelas!`);
+    });
+    saveState();
+    closeSyncMeetingModal();
+    toast(`✅ Berhasil menyamakan Pertemuan ${currentMeeting} ke ${count} kelas! (Jam disesuaikan otomatis)`);
+  }
 }
 
 function onDateChange() {
@@ -2033,10 +2170,14 @@ function autoDetectHour() {
   toast(`✅ Jam terdeteksi: Jam Ke-${detected}`);
 }
 
-function updateMeetingData() {
+function updateMeetingData(isManualChange = true) {
   const c = state.classes[currentClass];
   if (c.meetings === 0) return;
   if (!c.meetingsData[currentMeeting]) c.meetingsData[currentMeeting] = {};
+  const hourSelect = document.getElementById('meetingHour');
+  if (hourSelect && isManualChange) {
+    hourSelect.dataset.userModified = 'true';
+  }
   c.meetingsData[currentMeeting].date = document.getElementById('meetingDate').value;
   c.meetingsData[currentMeeting].hour = +document.getElementById('meetingHour').value;
   c.meetingsData[currentMeeting].material = document.getElementById('meetingMaterial').value;
@@ -2240,17 +2381,10 @@ function removeClass(idx) {
     : `Hapus kelas "${cls.name}"?`;
 
   showConfirm('🗑 Hapus Kelas', warnMsg + '\n\nTindakan ini tidak bisa dibatalkan.', () => {
-    const wasActive = idx === currentClass;
     const removedName = cls.name;
     tempClasses.splice(idx, 1);
     if (tempTeacherSchedule && tempTeacherSchedule.length > 0) {
       tempTeacherSchedule = tempTeacherSchedule.filter(ts => ts.className !== removedName);
-    }
-    if (wasActive) {
-      currentClass = 0;
-      currentMeeting = 1;
-    } else if (idx < currentClass) {
-      currentClass--;
     }
     renderClassList();
     renderTeacherScheduleList();
@@ -2930,6 +3064,48 @@ function addMeeting() {
   c.meetingsData[currentMeeting] = { date: todayStr, hour: initialHour, material: '' };
   render();
   toast(`✅ Pertemuan ${currentMeeting} — ${DAY_NAMES[now.getDay()]}, Jam Ke-${detectedHour}`);
+}
+function deleteMeeting() {
+  const c = state.classes[currentClass];
+  if (c.meetings === 0) {
+    toast('Belum ada pertemuan untuk dihapus!', 'error');
+    return;
+  }
+  const targetMeeting = currentMeeting;
+  showConfirm('🗑 Hapus Pertemuan', `Yakin ingin menghapus Pertemuan ${targetMeeting} dari kelas ${c.name}?\n\nPertemuan setelahnya akan bergeser maju.`, () => {
+    const newMeetingsData = {};
+    for (let m = 1; m <= c.meetings; m++) {
+      if (m < targetMeeting) {
+        if (c.meetingsData[m]) newMeetingsData[m] = c.meetingsData[m];
+      } else if (m > targetMeeting) {
+        if (c.meetingsData[m]) newMeetingsData[m - 1] = c.meetingsData[m];
+      }
+    }
+    c.meetingsData = newMeetingsData;
+
+    c.students.forEach(st => {
+      if (c.attendance[st.id]) {
+        const newAtt = {};
+        for (let m = 1; m <= c.meetings; m++) {
+          if (m < targetMeeting) {
+            if (c.attendance[st.id][m] !== undefined) newAtt[m] = c.attendance[st.id][m];
+          } else if (m > targetMeeting) {
+            if (c.attendance[st.id][m] !== undefined) newAtt[m - 1] = c.attendance[st.id][m];
+          }
+        }
+        c.attendance[st.id] = newAtt;
+      }
+    });
+
+    c.meetings--;
+    if (c.meetings === 0) {
+      currentMeeting = 1;
+    } else if (currentMeeting > c.meetings) {
+      currentMeeting = c.meetings;
+    }
+    render();
+    toast(`✅ Pertemuan ${targetMeeting} berhasil dihapus.`);
+  }, false);
 }
 function nextMeeting() {
   const c = state.classes[currentClass];
