@@ -124,6 +124,28 @@
   .radio-group label:has(input:checked) { background: #dbeafe; border-color: #2a5298; color: #1e3a8a; }
   .toast { position: fixed; top: 15px; right: 15px; background: #10b981; color: #fff; padding: 10px 16px; border-radius: 4px; font-size: 13px; z-index: 300; opacity: 0; transition: opacity .3s; }
   .toast.show { opacity: 1; }
+
+  /* Online & Sync Status Indicators */
+  .sync-indicators { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .status-badge { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; text-decoration: none; user-select: none; }
+  .status-badge-net.online { background: #dcfce7; color: #15803d; border: 1px solid #86efac; }
+  .status-badge-net.offline { background: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; }
+  .status-badge-sync { background: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; cursor: pointer; transition: all .2s ease; }
+  .status-badge-sync:hover { filter: brightness(0.95); }
+  .status-badge-sync.synced { background: #eff6ff; color: #1d4ed8; border-color: #bfdbfe; }
+  .status-badge-sync.pending { background: #fef3c7; color: #b45309; border-color: #fde68a; }
+  .status-badge-sync.syncing { background: #ede9fe; color: #6d28d9; border-color: #ddd6fe; animation: pulse-sync 1.5s infinite; }
+  .status-badge-sync.no-url { background: #f3f4f6; color: #6b7280; border-color: #e5e7eb; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .dot-online { background: #22c55e; box-shadow: 0 0 6px #22c55e; }
+  .dot-offline { background: #ef4444; }
+  .dot-pending { background: #f59e0b; }
+  .dot-syncing { background: #8b5cf6; }
+
+  @keyframes pulse-sync {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+  }
   @media (max-width: 640px) {
     body { font-size: 13px; }
     .toolbar, .info-bar, .meeting-form, .table-wrap { padding: 10px; }
@@ -169,7 +191,17 @@
       <p id="headerSub">Sistem Absensi Siswa • <span id="headerTA">TA 2026/2027 (GASAL)</span> • <span id="headerClock">🕐 12:22:36</span></p>
       <div class="teacher" id="headerTeacher">‍🏫 Guru: Suhardi, S. Pd. | 📖 Mapel: Informatika</div>
     </div>
-    <div class="school-badge" id="headerBadge">9 Kelas • 50 Pertemuan</div>
+    <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 6px;">
+      <div class="school-badge" id="headerBadge">9 Kelas • 50 Pertemuan</div>
+      <div class="sync-indicators" id="headerSyncIndicators">
+        <span class="status-badge status-badge-net online" id="netStatusBadge" title="Status koneksi internet perangkat">
+          <span class="dot dot-online" id="netStatusDot"></span> <span id="netStatusText">Online</span>
+        </span>
+        <span class="status-badge status-badge-sync synced" id="syncStatusBadge" onclick="handleSyncBadgeClick()" title="Klik untuk sinkronisasi Google Sheets">
+          <span id="syncStatusIcon">☁️</span> <span id="syncStatusText">Tersinkronisasi</span>
+        </span>
+      </div>
+    </div>
   </header>
 
   <div class="toolbar">
@@ -1405,6 +1437,7 @@ function defaultState() {
       { id: 'ts_1', day: 'Senin', className: 'X DKV 1', startHour: 1, endHour: 3, subject: 'Informatika' },
       { id: 'ts_2', day: 'Selasa', className: 'X DKV 2', startHour: 7, endHour: 9, subject: 'Informatika' }
     ],
+    lastSyncedAt: 0,
     classes
   };
 }
@@ -1461,6 +1494,7 @@ function migrateState(s) {
   if (!s.maxMeetings || isNaN(Number(s.maxMeetings)) || Number(s.maxMeetings) < 1) s.maxMeetings = DEFAULT_MAX_MEETINGS;
   else s.maxMeetings = Math.max(1, parseInt(s.maxMeetings));
   if (!s.googleScriptUrl) s.googleScriptUrl = '';
+  if (!s.lastSyncedAt || typeof s.lastSyncedAt !== 'number') s.lastSyncedAt = 0;
 
   if (!Array.isArray(s.subjects)) {
     const oldSubject = s.subject || 'Informatika';
@@ -1571,6 +1605,9 @@ async function loadStateFromIDB() {
   }
 }
 
+let autoSyncTimeout = null;
+let materialDebounceTimeout = null;
+
 function saveState() {
   state.updatedAt = Date.now();
   let localStorageSaved = false;
@@ -1583,6 +1620,8 @@ function saveState() {
   if (embEl) embEl.textContent = JSON.stringify(state);
 
   saveStateToIDB(state);
+  updateSyncStatusUI();
+  queueAutoSync();
 }
 
 function esc(s) {
@@ -1724,6 +1763,74 @@ function startClock() {
   clockInterval = setInterval(updateRealTimeClockAndHour, 1000);
 }
 
+/* ===== STATUS BADGE & UI SINKRONISASI ===== */
+function updateSyncStatusUI() {
+  const netBadge = document.getElementById('netStatusBadge');
+  const netDot = document.getElementById('netStatusDot');
+  const netText = document.getElementById('netStatusText');
+
+  const syncBadge = document.getElementById('syncStatusBadge');
+  const syncIcon = document.getElementById('syncStatusIcon');
+  const syncText = document.getElementById('syncStatusText');
+
+  if (!netBadge || !syncBadge) return;
+
+  const isOnline = navigator.onLine;
+
+  if (isOnline) {
+    netBadge.className = 'status-badge status-badge-net online';
+    if (netDot) netDot.className = 'dot dot-online';
+    if (netText) netText.textContent = 'Online';
+    netBadge.title = 'Perangkat terhubung ke internet';
+  } else {
+    netBadge.className = 'status-badge status-badge-net offline';
+    if (netDot) netDot.className = 'dot dot-offline';
+    if (netText) netText.textContent = 'Offline';
+    netBadge.title = 'Perangkat OFFLINE - Data tersimpan aman di browser/IndexedDB';
+  }
+
+  if (isSyncing) {
+    syncBadge.className = 'status-badge status-badge-sync syncing';
+    if (syncIcon) syncIcon.textContent = '🔄';
+    if (syncText) syncText.textContent = 'Menyinkronkan...';
+    syncBadge.title = 'Sedang mengirim data ke Google Sheets...';
+  } else if (!state.googleScriptUrl) {
+    syncBadge.className = 'status-badge status-badge-sync no-url';
+    if (syncIcon) syncIcon.textContent = '⚠️';
+    if (syncText) syncText.textContent = 'URL Sheets Belum Disetel';
+    syncBadge.title = 'Klik untuk membuka Settings dan memasukkan URL Web App Google Apps Script';
+  } else if (hasPendingChanges()) {
+    syncBadge.className = 'status-badge status-badge-sync pending';
+    if (syncIcon) syncIcon.textContent = '⏳';
+    if (isOnline) {
+      if (syncText) syncText.textContent = 'Menyinkronkan...';
+      syncBadge.title = 'Perubahan terdeteksi, sinkronisasi otomatis terjadwal';
+    } else {
+      if (syncText) syncText.textContent = 'Tersimpan Lokal (Menunggu Internet)';
+      syncBadge.title = 'Data tersimpan offline. Akan disinkronkan otomatis begitu terhubung internet';
+    }
+  } else {
+    syncBadge.className = 'status-badge status-badge-sync synced';
+    if (syncIcon) syncIcon.textContent = '☁️';
+    if (syncText) syncText.textContent = 'Tersinkronisasi';
+    const lastSyncTime = state.lastSyncedAt ? new Date(state.lastSyncedAt).toLocaleTimeString('id-ID') : '-';
+    syncBadge.title = `Data di Google Sheets sudah terbaru (Terakhir: ${lastSyncTime})`;
+  }
+}
+
+function handleSyncBadgeClick() {
+  if (!state.googleScriptUrl) {
+    openSettingsModal();
+    toast('⚠️ Silakan masukkan Web App URL Google Apps Script', 'error');
+    return;
+  }
+  if (!navigator.onLine) {
+    toast('📴 Anda sedang OFFLINE. Semua data tetap tersimpan di perangkat dan akan disinkronkan otomatis saat online.', 'error');
+    return;
+  }
+  syncToGoogleSheets(false);
+}
+
 /* ===== HEADER ===== */
 function renderHeader() {
   document.getElementById('headerSchool').textContent = ' ' + state.schoolName;
@@ -1733,6 +1840,7 @@ function renderHeader() {
   const maxM = state.maxMeetings || DEFAULT_MAX_MEETINGS;
   document.getElementById('headerTeacher').textContent = `‍🏫 Guru: ${teacher} | 📖 Mapel: ${subject}`;
   document.getElementById('headerBadge').textContent = `${state.classes.length} Kelas • ${maxM} Pertemuan`;
+  updateSyncStatusUI();
 }
 
 /* ===== RENDER ===== */
@@ -1856,7 +1964,7 @@ function renderMeetingForm() {
     </div>
     <div class="form-row">
       <div style="flex:3"><label>Materi yang Disampaikan</label>
-        <textarea id="meetingMaterial" placeholder="Tuliskan materi..." onchange="updateMeetingData()">${esc(d.material)}</textarea></div>
+        <textarea id="meetingMaterial" placeholder="Tuliskan materi..." oninput="onMaterialInput(this.value)" onchange="updateMeetingData()">${esc(d.material)}</textarea></div>
     </div>
     <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px; margin-top:8px;">
       <div style="font-size:11px; color:#6b7280;">
@@ -2170,7 +2278,18 @@ function autoDetectHour() {
   toast(`✅ Jam terdeteksi: Jam Ke-${detected}`);
 }
 
-function updateMeetingData(isManualChange = true) {
+function onMaterialInput(val) {
+  const c = state.classes[currentClass];
+  if (c.meetings === 0) return;
+  if (!c.meetingsData[currentMeeting]) c.meetingsData[currentMeeting] = {};
+  c.meetingsData[currentMeeting].material = val;
+  if (materialDebounceTimeout) clearTimeout(materialDebounceTimeout);
+  materialDebounceTimeout = setTimeout(() => {
+    saveState();
+  }, 500);
+}
+
+function updateMeetingData(isManualChange = true, showToast = true) {
   const c = state.classes[currentClass];
   if (c.meetings === 0) return;
   if (!c.meetingsData[currentMeeting]) c.meetingsData[currentMeeting] = {};
@@ -2178,11 +2297,15 @@ function updateMeetingData(isManualChange = true) {
   if (hourSelect && isManualChange) {
     hourSelect.dataset.userModified = 'true';
   }
-  c.meetingsData[currentMeeting].date = document.getElementById('meetingDate').value;
-  c.meetingsData[currentMeeting].hour = +document.getElementById('meetingHour').value;
-  c.meetingsData[currentMeeting].material = document.getElementById('meetingMaterial').value;
+  const dateInput = document.getElementById('meetingDate');
+  const matInput = document.getElementById('meetingMaterial');
+  if (dateInput) c.meetingsData[currentMeeting].date = dateInput.value;
+  if (hourSelect) c.meetingsData[currentMeeting].hour = +hourSelect.value;
+  if (matInput) c.meetingsData[currentMeeting].material = matInput.value;
   saveState();
-  toast('✅ Materi & jadwal tersimpan');
+  if (showToast) {
+    toast('✅ Materi & jadwal tersimpan');
+  }
 }
 
 function renderTable() {
@@ -3290,16 +3413,58 @@ function buildClassesPayloadForGoogle() {
   });
 }
 
-async function syncToGoogleSheets() {
+let isSyncing = false;
+
+function hasPendingChanges() {
+  const updated = state.updatedAt || 0;
+  const synced = state.lastSyncedAt || 0;
+  return updated > synced;
+}
+
+function queueAutoSync(delay = 2000) {
+  if (autoSyncTimeout) clearTimeout(autoSyncTimeout);
+  if (!navigator.onLine) {
+    updateSyncStatusUI();
+    return;
+  }
+  if (!state.googleScriptUrl) {
+    updateSyncStatusUI();
+    return;
+  }
+  autoSyncTimeout = setTimeout(() => {
+    syncToGoogleSheets(true);
+  }, delay);
+}
+
+async function syncToGoogleSheets(isAuto = false) {
   const urlInput = document.getElementById('setGoogleScriptUrl');
   const scriptUrl = (urlInput && urlInput.value.trim()) || state.googleScriptUrl;
 
   if (!scriptUrl) {
-    toast('⚠️ Masukkan Web App URL Google Apps Script di Settings terlebih dahulu!', 'error');
-    openSettingsModal();
+    if (!isAuto) {
+      toast('⚠️ Masukkan Web App URL Google Apps Script di Settings terlebih dahulu!', 'error');
+      openSettingsModal();
+    }
+    updateSyncStatusUI();
     return;
   }
-  toast('⏳ Mengirim data ke Google Spreadsheet...');
+
+  if (!navigator.onLine) {
+    updateSyncStatusUI();
+    if (!isAuto) {
+      toast('📡 Anda sedang offline. Data tersimpan di perangkat dan akan disinkronkan otomatis saat terhubung internet.', 'error');
+    }
+    return;
+  }
+
+  if (isSyncing) return;
+  isSyncing = true;
+  updateSyncStatusUI();
+
+  if (!isAuto) {
+    toast('⏳ Mengirim data ke Google Spreadsheet...');
+  }
+
   try {
     const payload = {
       action: 'sync',
@@ -3316,9 +3481,20 @@ async function syncToGoogleSheets() {
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify(payload)
     });
-    toast('✅ Data berhasil dikirim ke Google Spreadsheet!');
+    state.lastSyncedAt = Date.now();
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    } catch(e) {}
+    saveStateToIDB(state);
+    isSyncing = false;
+    updateSyncStatusUI();
+    toast(isAuto ? '☁️ Data tersinkron otomatis ke Google Sheets' : '✅ Data berhasil dikirim ke Google Spreadsheet!');
   } catch (err) {
-    toast('❌ Gagal sinkronisasi: ' + err.message, 'error');
+    isSyncing = false;
+    updateSyncStatusUI();
+    if (!isAuto) {
+      toast('❌ Gagal sinkronisasi: ' + err.message, 'error');
+    }
   }
 }
 
@@ -3658,10 +3834,32 @@ document.addEventListener('click', function(e) {
   }
 });
 
+/* ===== DETEKSI JARINGAN ONLINE / OFFLINE ===== */
+window.addEventListener('online', () => {
+  updateSyncStatusUI();
+  toast('📡 Terhubung ke internet! Memulai sinkronisasi otomatis...');
+  if (hasPendingChanges() && state.googleScriptUrl) {
+    syncToGoogleSheets(true);
+  }
+});
+
+window.addEventListener('offline', () => {
+  updateSyncStatusUI();
+  toast('📴 Anda dalam mode OFFLINE. Semua perubahan tetap tersimpan otomatis di perangkat.', 'error');
+});
+
+// Periodic background check jika ada pending changes dan kondisi online
+setInterval(() => {
+  if (navigator.onLine && hasPendingChanges() && state.googleScriptUrl && !isSyncing) {
+    syncToGoogleSheets(true);
+  }
+}, 15000);
+
 /* ===== INIT ===== */
 startClock();
 render();
 autoSelectTodayClass(false);
+updateSyncStatusUI();
 
 loadStateFromIDB().then(idbState => {
   if (idbState && idbState.classes) {
@@ -3671,9 +3869,17 @@ loadStateFromIDB().then(idbState => {
       saveState();
       render();
       autoSelectTodayClass(false);
+      updateSyncStatusUI();
     }
   }
 });
+
+// Sync saat pertama kali load jika online dan ada perubahan tertunda
+if (navigator.onLine && hasPendingChanges() && state.googleScriptUrl) {
+  setTimeout(() => {
+    syncToGoogleSheets(true);
+  }, 1000);
+}
 </script>
 
 
